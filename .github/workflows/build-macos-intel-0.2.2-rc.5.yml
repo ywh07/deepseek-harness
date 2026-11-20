@@ -1,0 +1,69 @@
+name: Build Intel macOS DMG 0.2.2-rc.5
+
+on:
+  push:
+    branches: [codex/build-macos-intel-0.2.2-rc.5]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24.21.0'
+      - uses: pnpm/action-setup@v5.0.0
+      - name: Check version and build host
+        run: |
+          test "$(git rev-parse HEAD^)" = 9c2670d3bce5275e0d1610272958121af87787bb
+          test "$(git diff HEAD^ HEAD --name-only)" = .github/workflows/build-macos-intel-0.2.2-rc.5.yml
+          test "$(node -p 'require("./apps/desktop/package.json").version')" = 0.2.2-rc.5
+          test "$(uname -m)" = x86_64
+          case "$(sw_vers -productVersion)" in 15.*) ;; *) exit 1 ;; esac
+          df -h .
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build Intel disk image
+        run: |
+          pnpm run package:desktop:mac:x64:unsigned --check
+          pnpm run package:desktop:mac:x64:unsigned
+      - name: Verify the disk image and application
+        shell: bash
+        working-directory: apps/desktop/.desktop-build/targets/mac-x64/unsigned-artifacts
+        run: |
+          dmg=deepseek-harness-0.2.2-rc.5-mac-x64-unsigned.dmg
+          hdiutil verify "$dmg"
+          mountpoint=$(mktemp -d)
+          trap 'rmdir "$mountpoint"' EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$dmg"
+          trap 'hdiutil detach "$mountpoint" && rmdir "$mountpoint"' EXIT
+          contents="$mountpoint/DeepSeek Harness.app/Contents"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$contents/Info.plist")" = 0.2.2-rc.5
+          executable=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$contents/Info.plist")
+          test "$(lipo -archs "$contents/MacOS/$executable")" = x86_64
+          test "$(ELECTRON_RUN_AS_NODE=1 "$contents/MacOS/$executable" -p process.arch)" = x64
+          shasum -a 256 "$dmg" | tee "$dmg.sha256"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: deepseek-harness-macos-intel-0.2.2-rc.5
+          path: apps/desktop/.desktop-build/targets/mac-x64/unsigned-artifacts/deepseek-harness-0.2.2-rc.5-mac-x64-unsigned.dmg*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@v7.0.1
+        if: failure()
+        with:
+          name: macos-intel-packaging-logs
+          path: apps/desktop/.desktop-build/packaging-runs/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
